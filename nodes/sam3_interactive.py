@@ -61,23 +61,34 @@ class SAM3PointCollector:
     # 12=LKnee, 13=LAnkle  (skip 14-17 eyes/ears — too close to nose)
     _POSE_KEYPOINT_INDICES = list(range(14))
 
-    # Skeleton limb connections (pairs of keypoint indices) for midpoint generation
-    # Each pair defines a body segment; we'll add a midpoint for denser coverage
+    # Skeleton limb connections (pairs of keypoint indices) for dense coverage
+    # Includes standard limbs + torso cross-connections + direct shoulder→hip
     _SKELETON_LIMBS = [
-        (1, 2),  # Neck → RShoulder
-        (1, 5),  # Neck → LShoulder
+        # --- Arms ---
         (2, 3),  # RShoulder → RElbow
         (3, 4),  # RElbow → RWrist
         (5, 6),  # LShoulder → LElbow
         (6, 7),  # LElbow → LWrist
-        (1, 8),  # Neck → RHip (right torso)
-        (1, 11),  # Neck → LHip (left torso)
+        # --- Upper body horizontal ---
+        (1, 2),  # Neck → RShoulder
+        (1, 5),  # Neck → LShoulder
+        (2, 5),  # RShoulder → LShoulder (chest line)
+        # --- Torso vertical (both sides) ---
+        (2, 8),  # RShoulder → RHip
+        (5, 11),  # LShoulder → LHip
+        # --- Torso diagonal cross for center fill ---
+        (2, 11),  # RShoulder → LHip (cross)
+        (5, 8),  # LShoulder → RHip (cross)
+        # --- Torso center vertical ---
+        (1, 8),  # Neck → RHip
+        (1, 11),  # Neck → LHip
+        # --- Hip line ---
+        (8, 11),  # RHip → LHip (hip line)
+        # --- Legs ---
         (8, 9),  # RHip → RKnee
         (9, 10),  # RKnee → RAnkle
         (11, 12),  # LHip → LKnee
         (12, 13),  # LKnee → LAnkle
-        (2, 5),  # RShoulder → LShoulder (chest line)
-        (8, 11),  # RHip → LHip (hip line)
     ]
 
     # body_points indices from WanAnimatePreprocess: [0, 1, 2, 5, 8, 11, 10, 13]
@@ -126,11 +137,11 @@ class SAM3PointCollector:
                 "pose_confidence_threshold": (
                     "FLOAT",
                     {
-                        "default": 0.3,
+                        "default": 0.05,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
-                        "tooltip": "Minimum confidence for a pose keypoint to be used as a positive point.",
+                        "tooltip": "Minimum confidence for a pose keypoint to be used as a positive point. Low value (0.05) ensures arms/hands are included.",
                     },
                 ),
             },
@@ -372,15 +383,11 @@ class SAM3PointCollector:
         """
         Generate high-quality SAM3 point prompts using YOLO bbox + body keypoints.
 
-        Strategy for POSITIVE points:
-        - Use body keypoints that fall inside the bbox
-        - Add midpoints between adjacent keypoints for denser body coverage
-        - If no keypoints available, use anatomical grid inside bbox
+        POSITIVE (green): body keypoints + dense interpolation along skeleton limbs.
+        Covers the ENTIRE body skeleton.
 
-        Strategy for NEGATIVE points:
-        - Place points just outside each side of the bbox (close boundary)
-        - Add corner points far from the body (guaranteed background)
-        - All negative points MUST be outside the person bbox
+        NEGATIVE (red): image corners/edges far from the body.
+        Anti-conflict: red points guaranteed to be far from all green points.
         """
         if not bboxes or len(bboxes) == 0:
             return None, None
@@ -397,7 +404,7 @@ class SAM3PointCollector:
         bw, bh = x2 - x1, y2 - y1
         log.info(f"BBOX person: ({x1:.0f},{y1:.0f})-({x2:.0f},{y2:.0f})  size={bw:.0f}x{bh:.0f}")
 
-        # ─── POSITIVE points ───────────────────────────────────────────
+        # ─── POSITIVE (green): dense skeleton coverage ─────────────────
         positive = {"points": [], "labels": []}
         body_kps = []  # pixel coords of all body keypoints
 
@@ -416,32 +423,37 @@ class SAM3PointCollector:
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
-        # Add midpoints between adjacent body keypoints for denser coverage
         # body_points indices: [Nose, Neck, RShoulder, LShoulder, RHip, LHip, RAnkle, LAnkle]
-        # Semantic connections between these 8 points:
+        # Dense connections including torso cross-fill:
         _bp_limbs = [
+            (0, 1),  # Nose → Neck
             (1, 2),  # Neck → RShoulder
             (1, 3),  # Neck → LShoulder
-            (2, 4),  # RShoulder → RHip (right torso)
-            (3, 5),  # LShoulder → LHip (left torso)
-            (4, 5),  # RHip → LHip
-            (4, 6),  # RHip → RAnkle (right leg approx)
-            (5, 7),  # LHip → LAnkle (left leg approx)
             (2, 3),  # RShoulder → LShoulder (chest)
-            (0, 1),  # Nose → Neck
+            (2, 4),  # RShoulder → RHip (right torso side)
+            (3, 5),  # LShoulder → LHip (left torso side)
+            (2, 5),  # RShoulder → LHip (torso cross)
+            (3, 4),  # LShoulder → RHip (torso cross)
+            (4, 5),  # RHip → LHip
+            (4, 6),  # RHip → RAnkle (right leg)
+            (5, 7),  # LHip → LAnkle (left leg)
         ]
 
-        midpoints = []
+        # Dense interpolation along each limb (7 points per limb)
+        limb_pts = []
         if len(body_kps) >= 2:
             for i, j in _bp_limbs:
                 if i < len(body_kps) and j < len(body_kps):
-                    mx = (body_kps[i][0] + body_kps[j][0]) / 2.0
-                    my = (body_kps[i][1] + body_kps[j][1]) / 2.0
-                    if inner_x1 <= mx <= inner_x2 and inner_y1 <= my <= inner_y2:
-                        midpoints.append((mx, my))
+                    ax, ay = body_kps[i]
+                    bx_pt, by_pt = body_kps[j]
+                    for frac in self._LIMB_FRACTIONS:
+                        ix = ax + (bx_pt - ax) * frac
+                        iy = ay + (by_pt - ay) * frac
+                        if inner_x1 <= ix <= inner_x2 and inner_y1 <= iy <= inner_y2:
+                            limb_pts.append((ix, iy))
 
-        # Combine keypoints + midpoints, deduplicate nearby points
-        all_pos_px = body_kps + midpoints
+        # Combine keypoints + limb interpolation points
+        all_pos_px = body_kps + limb_pts
 
         # Fallback: anatomical grid inside bbox (if no body keypoints)
         if not all_pos_px:
@@ -458,8 +470,8 @@ class SAM3PointCollector:
                 (x1 + bw * 0.60, y1 + bh * 0.75),  # left thigh
             ]
 
-        # Deduplicate: remove points too close to each other (< 3% of bbox diagonal)
-        min_dist = np.sqrt(bw**2 + bh**2) * 0.03
+        # Deduplicate: remove points too close to each other (< 2% of bbox diagonal)
+        min_dist = np.sqrt(bw**2 + bh**2) * 0.02
         deduped = []
         for px, py in all_pos_px:
             too_close = False
@@ -479,32 +491,35 @@ class SAM3PointCollector:
         if not positive["points"]:
             return None, None
 
-        # ─── NEGATIVE points ──────────────────────────────────────────
+        # ─── NEGATIVE (red): far background, away from all green ───────
         negative = {"points": [], "labels": []}
 
-        # Gap between bbox edge and negative point (scaled by multiplier)
-        gap = max(bw, bh) * 0.1 * neg_radius_mult
+        # Minimum distance from any green point for a red point to be valid
+        safe_radius = max(bw, bh) * 0.15 * neg_radius_mult
 
-        # Strategy 1: Close boundary — 4 points just outside each bbox edge midpoint
+        # Candidate negative positions: image corners + edge midpoints
+        margin_neg_x = img_width * 0.03
+        margin_neg_y = img_height * 0.03
         neg_candidates = [
-            ((x1 + x2) / 2.0, max(0, y1 - gap)),  # above
-            ((x1 + x2) / 2.0, min(img_height - 1, y2 + gap)),  # below
-            (max(0, x1 - gap), (y1 + y2) / 2.0),  # left
-            (min(img_width - 1, x2 + gap), (y1 + y2) / 2.0),  # right
-        ]
-
-        # Strategy 2: Diagonal outside — 4 points at bbox corner diagonals
-        diag_gap = gap * 0.7
-        neg_candidates += [
-            (max(0, x1 - diag_gap), max(0, y1 - diag_gap)),  # top-left
-            (min(img_width - 1, x2 + diag_gap), max(0, y1 - diag_gap)),  # top-right
-            (min(img_width - 1, x2 + diag_gap), min(img_height - 1, y2 + diag_gap)),  # bottom-right
-            (max(0, x1 - diag_gap), min(img_height - 1, y2 + diag_gap)),  # bottom-left
+            # 4 corners
+            (margin_neg_x, margin_neg_y),
+            (img_width - margin_neg_x, margin_neg_y),
+            (img_width - margin_neg_x, img_height - margin_neg_y),
+            (margin_neg_x, img_height - margin_neg_y),
+            # 4 edge midpoints
+            (img_width / 2.0, margin_neg_y),
+            (img_width / 2.0, img_height - margin_neg_y),
+            (margin_neg_x, img_height / 2.0),
+            (img_width - margin_neg_x, img_height / 2.0),
         ]
 
         for px, py in neg_candidates:
-            # CRITICAL: skip any negative point that falls inside the person bbox
+            # Skip if inside person bbox
             if x1 <= px <= x2 and y1 <= py <= y2:
+                continue
+            # Skip if too close to ANY positive (green) point
+            too_close = any(np.sqrt((px - gx) ** 2 + (py - gy) ** 2) < safe_radius for gx, gy in deduped)
+            if too_close:
                 continue
             nx, ny = px / img_width, py / img_height
             if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
@@ -513,17 +528,24 @@ class SAM3PointCollector:
 
         log.info(
             f"BBOX auto-points: {len(positive['points'])} pos "
-            f"({len(body_kps)} kps + {len(midpoints)} mids), "
-            f"{len(negative['points'])} neg, gap={gap:.0f}px"
+            f"({len(body_kps)} kps + {len(limb_pts)} limb-pts), "
+            f"{len(negative['points'])} neg (safe_radius={safe_radius:.0f}px)"
         )
         return positive, negative
+
+    # Interpolation fractions for dense skeleton coverage
+    # 7 points along each limb for thorough fill
+    _LIMB_FRACTIONS = [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
 
     def _extract_pose_points(self, pose_data, img_width, img_height, neg_radius_mult, conf_threshold):
         """
         Generate SAM3 point prompts from POSEDATA skeleton.
 
-        Positive: confident keypoints + midpoints between skeleton limbs.
-        Negative: points just outside the skeleton bounding box on all 8 sides.
+        Positive (green): ALL confident keypoints + dense interpolated points
+        along every skeleton limb (at 25%, 50%, 75%).  Covers the ENTIRE body.
+
+        Negative (red): placed on image corners/edges far from the body.
+        A minimum distance check ensures no red point is near any green point.
         """
         pd = pose_data
         if isinstance(pd, dict) and "pose_data" in pd:
@@ -574,21 +596,24 @@ class SAM3PointCollector:
         if not valid_kp:
             return None, None
 
-        # Positive: keypoints
+        # ─── POSITIVE (green): keypoints + dense limb interpolation ────
         all_pos_px = list(valid_kp.values())
 
-        # Positive: midpoints between skeleton limbs where both ends are valid
+        # For every skeleton limb, add points at 25%, 50%, 75%
         for i, j in self._SKELETON_LIMBS:
             if i in valid_kp and j in valid_kp:
-                mx = (valid_kp[i][0] + valid_kp[j][0]) / 2.0
-                my = (valid_kp[i][1] + valid_kp[j][1]) / 2.0
-                if 0 < mx < img_width and 0 < my < img_height:
-                    all_pos_px.append((mx, my))
+                ax, ay = valid_kp[i]
+                bx, by = valid_kp[j]
+                for frac in self._LIMB_FRACTIONS:
+                    ix = ax + (bx - ax) * frac
+                    iy = ay + (by - ay) * frac
+                    if 0 < ix < img_width and 0 < iy < img_height:
+                        all_pos_px.append((ix, iy))
 
-        # Deduplicate nearby points
+        # Deduplicate nearby points (2% of skeleton bbox diagonal)
         valid_arr = np.array(list(valid_kp.values()))
         bbox_diag = float(np.linalg.norm(valid_arr.max(axis=0) - valid_arr.min(axis=0)))
-        min_dist = bbox_diag * 0.03
+        min_dist = bbox_diag * 0.02
         deduped = []
         for px, py in all_pos_px:
             if not any(np.sqrt((px - ex) ** 2 + (py - ey) ** 2) < min_dist for ex, ey in deduped):
@@ -599,41 +624,40 @@ class SAM3PointCollector:
             positive["points"].append([px / img_width, py / img_height])
             positive["labels"].append(1)
 
-        # Compute body bbox and torso size for negative point scaling
+        if not positive["points"]:
+            return None, None
+
+        # ─── NEGATIVE (red): far background, away from all green points ─
+        # Compute body bbox for safety margin
         bbox_min = valid_arr.min(axis=0)
         bbox_max = valid_arr.max(axis=0)
         bw = bbox_max[0] - bbox_min[0]
         bh = bbox_max[1] - bbox_min[1]
 
-        NECK, RHIP, LHIP = 1, 8, 11
-        torso_size = 0.0
-        if NECK in valid_kp and (RHIP in valid_kp or LHIP in valid_kp):
-            hip_pts = [valid_kp[i] for i in (RHIP, LHIP) if i in valid_kp]
-            mid_hip = np.mean(hip_pts, axis=0)
-            torso_size = float(np.linalg.norm(np.array(valid_kp[NECK]) - mid_hip))
-        if torso_size < 10:
-            torso_size = bbox_diag / 4.0
+        # Minimum distance from any green point for a red point to be valid
+        safe_radius = max(bw, bh) * 0.15 * neg_radius_mult
 
-        # Negative: points just outside the body bbox on 8 sides
-        gap = max(bw, bh) * 0.12 * neg_radius_mult
-        x1, y1 = bbox_min[0], bbox_min[1]
-        x2, y2 = bbox_max[0], bbox_max[1]
-        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-
+        # Candidate negative positions: image corners + edge midpoints (far background)
+        margin_x = img_width * 0.03
+        margin_y = img_height * 0.03
         neg_candidates = [
-            (cx, max(0, y1 - gap)),  # top
-            (cx, min(img_height - 1, y2 + gap)),  # bottom
-            (max(0, x1 - gap), cy),  # left
-            (min(img_width - 1, x2 + gap), cy),  # right
-            (max(0, x1 - gap * 0.7), max(0, y1 - gap * 0.7)),  # top-left
-            (min(img_width - 1, x2 + gap * 0.7), max(0, y1 - gap * 0.7)),  # top-right
-            (min(img_width - 1, x2 + gap * 0.7), min(img_height - 1, y2 + gap * 0.7)),  # bottom-right
-            (max(0, x1 - gap * 0.7), min(img_height - 1, y2 + gap * 0.7)),  # bottom-left
+            # 4 corners
+            (margin_x, margin_y),
+            (img_width - margin_x, margin_y),
+            (img_width - margin_x, img_height - margin_y),
+            (margin_x, img_height - margin_y),
+            # 4 edge midpoints
+            (img_width / 2.0, margin_y),
+            (img_width / 2.0, img_height - margin_y),
+            (margin_x, img_height / 2.0),
+            (img_width - margin_x, img_height / 2.0),
         ]
 
         negative = {"points": [], "labels": []}
         for px, py in neg_candidates:
-            if x1 <= px <= x2 and y1 <= py <= y2:
+            # Skip if too close to ANY positive (green) point
+            too_close = any(np.sqrt((px - gx) ** 2 + (py - gy) ** 2) < safe_radius for gx, gy in deduped)
+            if too_close:
                 continue
             nx, ny = px / img_width, py / img_height
             if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
@@ -642,8 +666,8 @@ class SAM3PointCollector:
 
         log.info(
             f"Pose auto-points: {len(positive['points'])} pos "
-            f"({len(valid_kp)} kps + {len(deduped) - len(valid_kp)} mids), "
-            f"{len(negative['points'])} neg, torso={torso_size:.0f}px"
+            f"({len(valid_kp)} kps + {len(deduped) - len(valid_kp)} limb-pts), "
+            f"{len(negative['points'])} neg (safe_radius={safe_radius:.0f}px)"
         )
         return positive, negative
 
