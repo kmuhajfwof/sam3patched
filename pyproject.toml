@@ -1,0 +1,13 @@
+[project]
+name = "comfyui-sam3"
+description = "SAM 3 (Segment Anything Model 3) integration for ComfyUI. Image and video segmentation with text prompts, boxes, and points"
+version = "0.1.4"
+license = {file = "LICENSE"}
+
+[tool.comfy]
+PublisherId = "pznodes"
+DisplayName = "SAM3"
+Icon = ""
+
+[project.urls]
+Repository = "https://github.com/PozzettiAndrea/ComfyUI-SAM3"
