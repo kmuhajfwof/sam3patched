@@ -61,7 +61,7 @@ app.registerExtension({
                 console.log("[SAM3] Creating canvas container");
                 // Create canvas container - dynamically sized based on node height
                 const container = document.createElement("div");
-                container.style.cssText = "position: relative; width: 100%; background: #222; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0; display: flex; align-items: center; justify-content: center;";
+                container.style.cssText = "position: relative; width: 100%; background: #222; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0;";
 
                 // Create info/button bar
                 const infoBar = document.createElement("div");
@@ -86,8 +86,7 @@ app.registerExtension({
                 const canvas = document.createElement("canvas");
                 canvas.width = 512;
                 canvas.height = 512;
-                // Use max-width and max-height instead of width/height 100% to prevent overflow
-                canvas.style.cssText = "display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; margin: 0 auto;";
+                canvas.style.cssText = "display: block; width: 100%; cursor: crosshair;";
                 container.appendChild(canvas);
 
                 const ctx = canvas.getContext("2d");
@@ -115,11 +114,14 @@ app.registerExtension({
                 this.canvasWidget.domWidget = widget;
 
                 // Make widget dynamically sized - override computeSize
+                this.canvasWidget.widgetHeight = 400; // Default height
                 widget.computeSize = (width) => {
-                    // Widget height = node height - title bar/padding (approx 80px)
-                    const nodeHeight = this.size ? this.size[1] : 480;
-                    const widgetHeight = Math.max(200, nodeHeight - 80);
-                    return [width, widgetHeight];
+                    if (this.canvasWidget.image) {
+                        const img = this.canvasWidget.image;
+                        const h = Math.round(width * (img.height / img.width));
+                        return [width, h];
+                    }
+                    return [width, this.canvasWidget.widgetHeight];
                 };
 
                 // Clear button handler
@@ -183,12 +185,6 @@ app.registerExtension({
 
                     // Restore types
                     hiddenWidgets.forEach((w, i) => w.type = originalTypes[i]);
-
-                    // Update container height based on current node size
-                    const containerHeight = Math.max(200, this.size[1] - 80);
-                    if (container.style.height !== containerHeight + "px") {
-                        container.style.height = containerHeight + "px";
-                    }
                 };
 
                 console.log("[SAM3] Widgets after hiding:", this.widgets.map(w => `${w.name}(${w.type})`));
@@ -307,6 +303,13 @@ app.registerExtension({
                             this.canvasWidget.image = img;
                             canvas.width = img.width;
                             canvas.height = img.height;
+
+                            // Let computeSize handle the layout via LiteGraph
+                            const nodeWidth = this.size[0] || 400;
+                            const optimalSize = this.computeSize();
+                            this.setSize([nodeWidth, optimalSize[1]]);
+                            app.graph.setDirtyCanvas(true, true);
+
                             console.log(`[SAM3] Canvas resized to: ${canvas.width}x${canvas.height}`);
                             this.redrawCanvas();
                         };
@@ -320,23 +323,8 @@ app.registerExtension({
                     if (originalOnResize) {
                         originalOnResize.apply(this, arguments);
                     }
-                    // Update container to match widget size
-                    const containerHeight = Math.max(200, size[1] - 80);
-                    container.style.height = containerHeight + "px";
-                    console.log(`[SAM3] Node resized to: ${size[0]}x${size[1]}, container height: ${containerHeight}px`);
-                };
-
-                // Also update on draw to handle any size changes
-                const originalOnDrawForeground = this.onDrawForeground;
-                this.onDrawForeground = function(ctx) {
-                    if (originalOnDrawForeground) {
-                        originalOnDrawForeground.apply(this, arguments);
-                    }
-                    // Update container height based on current node size
-                    const containerHeight = Math.max(200, this.size[1] - 80);
-                    if (container.style.height !== containerHeight + "px") {
-                        container.style.height = containerHeight + "px";
-                    }
+                    // Just redraw the canvas on resize - computeSize handles layout
+                    this.redrawCanvas();
                 };
 
                 // Draw initial placeholder
@@ -345,13 +333,10 @@ app.registerExtension({
 
                 // Set initial node size
                 const nodeWidth = Math.max(400, this.size[0] || 400);
-                const nodeHeight = 480; // Initial height: canvas (400) + space (80)
-                this.setSize([nodeWidth, nodeHeight]);
+                const optimalInitSize = this.computeSize();
+                this.setSize([nodeWidth, optimalInitSize[1]]);
 
-                // Set initial container height
-                container.style.height = "400px";
-
-                console.log("[SAM3] Node size set to:", [nodeWidth, nodeHeight]);
+                console.log("[SAM3] Node size set to:", [nodeWidth, optimalInitSize[1]]);
                 console.log("[SAM3] onNodeCreated complete");
                 return result;
             };

@@ -117,14 +117,14 @@ app.registerExtension({
 
             // Canvas wrapper
             const canvasWrapper = document.createElement("div");
-            canvasWrapper.style.cssText = "flex: 1; display: flex; align-items: center; justify-content: center; min-height: 200px;";
+            canvasWrapper.style.cssText = "flex: 1; min-height: 200px;";
             container.appendChild(canvasWrapper);
 
             // Canvas
             const canvas = document.createElement("canvas");
             canvas.width = 512;
             canvas.height = 512;
-            canvas.style.cssText = "display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair;";
+            canvas.style.cssText = "display: block; width: 100%; cursor: crosshair;";
             canvasWrapper.appendChild(canvas);
 
             const ctx = canvas.getContext("2d");
@@ -168,8 +168,12 @@ app.registerExtension({
             this.canvasWidget.domWidget = widget;
 
             widget.computeSize = (width) => {
-                const nodeHeight = this.size ? this.size[1] : 520;
-                return [width, Math.max(250, nodeHeight - 80)];
+                if (this.canvasWidget.image) {
+                    const img = this.canvasWidget.image;
+                    const h = Math.round(width * (img.height / img.width));
+                    return [width, h + 80]; // +80 for tab bar, info bar, queue panel
+                }
+                return [width, Math.max(250, 440)];
             };
 
             this.rebuildTabBar();
@@ -210,11 +214,6 @@ app.registerExtension({
                 hiddenWidgets.forEach(w => w.type = null);
                 if (originalDrawForeground) originalDrawForeground.apply(this, arguments);
                 hiddenWidgets.forEach((w, i) => w.type = originalTypes[i]);
-
-                const containerHeight = Math.max(250, this.size[1] - 80);
-                if (container.style.height !== containerHeight + "px") {
-                    container.style.height = containerHeight + "px";
-                }
             };
 
             // ---- Mouse events (same as multiregion) ----
@@ -298,6 +297,13 @@ app.registerExtension({
                         this.canvasWidget.image = img;
                         canvas.width = img.width;
                         canvas.height = img.height;
+
+                        // Let computeSize handle the layout
+                        const nodeWidth = this.size[0] || 400;
+                        const optimalSize = this.computeSize();
+                        this.setSize([nodeWidth, optimalSize[1]]);
+                        app.graph.setDirtyCanvas(true, true);
+
                         this.redrawCanvas();
                     };
                     img.src = "data:image/jpeg;base64," + message.bg_image[0];
@@ -317,12 +323,12 @@ app.registerExtension({
             const originalOnResize = this.onResize;
             this.onResize = function(size) {
                 if (originalOnResize) originalOnResize.apply(this, arguments);
-                container.style.height = Math.max(250, size[1] - 80) + "px";
+                this.redrawCanvas();
             };
 
             this.redrawCanvas();
-            this.setSize([400, 520]);
-            container.style.height = "440px";
+            const initOptimalSize = this.computeSize();
+            this.setSize([400, initOptimalSize[1]]);
 
             return result;
         };

@@ -61,7 +61,7 @@ app.registerExtension({
                 console.log("[SAM3] Creating canvas container");
                 // Create canvas container - dynamically sized based on node height
                 const container = document.createElement("div");
-                container.style.cssText = "position: relative; width: 100%; background: #222; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0; display: flex; align-items: center; justify-content: center;";
+                container.style.cssText = "position: relative; width: 100%; background: #222; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0;"; 
 
                 // Create info/button bar
                 const infoBar = document.createElement("div");
@@ -86,8 +86,7 @@ app.registerExtension({
                 const canvas = document.createElement("canvas");
                 canvas.width = 400;
                 canvas.height = 300;
-                // Use max-width and max-height instead of width/height 100% to prevent overflow
-                canvas.style.cssText = "display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; margin: 0 auto;";
+                canvas.style.cssText = "display: block; width: 100%; cursor: crosshair;";
                 container.appendChild(canvas);
 
                 const ctx = canvas.getContext("2d");
@@ -116,6 +115,11 @@ app.registerExtension({
                 // Dynamic widget height - updated when image loads
                 this.canvasWidget.widgetHeight = 300; // Default initial height
                 widget.computeSize = (width) => {
+                    if (this.canvasWidget.image) {
+                        const img = this.canvasWidget.image;
+                        const h = Math.round(width * (img.height / img.width));
+                        return [width, h];
+                    }
                     return [width, this.canvasWidget.widgetHeight];
                 };
 
@@ -298,19 +302,11 @@ app.registerExtension({
                             canvas.width = img.width;
                             canvas.height = img.height;
 
-                            // Calculate widget height based on image aspect ratio
+                            // Let computeSize handle the layout via LiteGraph
                             const nodeWidth = this.size[0] || 400;
-                            const availableWidth = nodeWidth - 20;
-                            const aspectRatio = img.height / img.width;
-                            const newWidgetHeight = Math.round(availableWidth * aspectRatio);
-
-                            const extraHeight = this._getWidgetsOverhead();
-
-                            this._isResizing = true;
-                            this.canvasWidget.widgetHeight = newWidgetHeight;
-                            container.style.height = newWidgetHeight + "px";
-                            this.setSize([nodeWidth, newWidgetHeight + extraHeight]);
-                            setTimeout(() => { this._isResizing = false; }, 50);
+                            const optimalSize = this.computeSize();
+                            this.setSize([nodeWidth, optimalSize[1]]);
+                            app.graph.setDirtyCanvas(true, true);
 
                             this.redrawCanvas();
                         };
@@ -332,23 +328,8 @@ app.registerExtension({
                     if (originalOnResize) {
                         originalOnResize.apply(this, arguments);
                     }
-
-                    // Prevent feedback loop - only update if not already resizing
-                    if (this._isResizing) return;
-                    this._isResizing = true;
-
-                    // Calculate new widget height from node size, accounting for extra widgets
-                    const extraHeight = this._getWidgetsOverhead();
-                    const newWidgetHeight = Math.max(200, size[1] - extraHeight);
-
-                    // Only update if significantly different (prevents micro-adjustments)
-                    if (Math.abs(newWidgetHeight - this.canvasWidget.widgetHeight) > 5) {
-                        this.canvasWidget.widgetHeight = newWidgetHeight;
-                        container.style.height = newWidgetHeight + "px";
-                    }
-
-                    // Reset flag after a short delay to allow resize to settle
-                    setTimeout(() => { this._isResizing = false; }, 50);
+                    // Just redraw the canvas on resize - computeSize handles layout
+                    this.redrawCanvas();
                 };
 
                 // Draw initial placeholder
@@ -357,14 +338,10 @@ app.registerExtension({
 
                 // Set initial node size (smaller default, will resize when image loads)
                 const nodeWidth = Math.max(400, this.size[0] || 400);
-                const initExtraHeight = this._getWidgetsOverhead();
-                const nodeHeight = 300 + initExtraHeight;
-                this.setSize([nodeWidth, nodeHeight]);
+                const optimalInitSize = this.computeSize();
+                this.setSize([nodeWidth, optimalInitSize[1]]);
 
-                // Set initial container height
-                container.style.height = "300px";
-
-                console.log("[SAM3] Node size set to:", [nodeWidth, nodeHeight]);
+                console.log("[SAM3] Node size set to:", [nodeWidth, optimalInitSize[1]]);
                 console.log("[SAM3] onNodeCreated complete");
                 return result;
             };
